@@ -1,0 +1,513 @@
+---
+title: "Lockdown2020"
+date: "11 5 2022"
+output: html_output
+editor_options: 
+  chunk_output_type: inline
+---
+# Install packages and load libraries
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#install.packages("librarian")
+librarian::shelf(frostr,jsonlite, ghql,lubridate, tidyverse, zoo, mlr, vtable, goeveg, tseries,ggstance,huxtable,ggsci)
+devtools::install_github("jacob-long/jtools")
+library(jtools)
+```
+
+# Get traffic movements data from trafikkdata api
+```{r}
+start_time<-Sys.time()
+
+link <- 'https://www.vegvesen.no/trafikkdata/api/'
+
+#Establishing connection to the GraphQL server
+con <- GraphqlClient$new(url = link)
+
+#Creating a query for hourly vehicle volume data
+qry <- Query$new()
+
+
+qry$query(
+  "Danmarks_Plass",
+  'query($previousCursor: String){
+  trafficData(trafficRegistrationPointId: "14630V805616") {
+    volume {
+      byHour(
+        from: "2017-03-01T00:00:00+02:00"
+        to: "2020-05-31T23:00:00+02:00"
+        after: $previousCursor
+      ) {pageInfo {
+        endCursor
+      hasNextPage}
+        edges {
+          node {
+            from
+            to
+            total{coverage{percentage}}
+            byLengthRange { 
+            	lengthRange{
+            		representation}
+              total{
+                volumeNumbers{
+                  volume}}
+            			
+            }
+          }
+        }
+      }
+    }
+  }
+}')
+
+#pagination from: https://developer.pluralsight.com/R_Integration.pdf
+#A function to paginate the data
+get_dplass<-function(previous_cursor=NA){
+  
+  dplass_full<-tibble()
+  
+  collect_data<-function(previous_cursor) {
+    if(is.null(previous_cursor)){
+      return()
+    }
+    vars=list(previousCursor=previous_cursor)
+    response<-
+      con$exec(qry$queries$Danmarks_Plass, vars) %>% 
+      fromJSON()
+    catalog<-response$data$trafficData
+    
+    collect_data(catalog$volume$byHour$pageInfo$endCursor)
+    
+    dplass<-catalog$volume$byHour$edges$node %>% as_tibble()
+    
+    dplass_full<<-
+      dplass_full %>% 
+      bind_rows(dplass)
+  }
+  collect_data(previous_cursor)
+  names(dplass_full)[3]<-"Coverage"
+  dplass_full
+}
+
+Trafficdata<-get_dplass() %>%
+  unnest_wider(byLengthRange) %>% 
+  unnest(cols = c(lengthRange, total)) %>% 
+  pivot_wider(names_from=representation, values_from=volumeNumbers)
+
+end_time<-Sys.time()
+
+end_time-start_time #1 min
+```
+
+# Tidying the traffic volume data
+```{r}
+#removing the redundant second Date column
+Trafficdata<-Trafficdata[,-2]
+
+#changing the names of the columns
+newnames<-c("Date","Coverage","u5.6m","o5.6m","b5676m","b76125m","b12516m","b1624m","o24m")
+names(Trafficdata)<-newnames
+
+#tidying the Date variable and changing date format
+Trafficdata$Date<-str_sub(Trafficdata$Date,start=1L,end=-7L)
+Trafficdata$Date<-ymd_hms(Trafficdata$Date, truncated = 2)
+
+#Unlisting the vehicle length variables
+Trafficdata[, 2:ncol(Trafficdata)] <- lapply(2:ncol(Trafficdata), function(x) as.numeric(unlist(Trafficdata[[x]])))
+
+#count the hours of under 95% Coverage  https://www.vegvesen.no/trafikkdata/start/om-trafikkdata
+Trafficdata %>% filter(Coverage<95) %>% count(Coverage) #93 instances of lower quality data from 28353 observations
+
+#remove hours with low coverage
+Trafficdata<-Trafficdata %>% 
+  filter(Coverage>95)
+```
+
+# Get air quality data from api NILU https://api.nilu.no/
+```{r}
+#luftkvalitet.info og nilu.no skal refereres til ved bruk av dette API.
+base_url<-"https://api.nilu.no/"
+
+info_url<-"obs/historical/2017-03-01%2000:00/2020-05-31%2000:00/Danmarks%20plass?components=no2;pm10;pm2.5"
+
+full_url<-paste0(base_url, info_url)
+
+api_call<-httr::GET(full_url)
+
+api_char<-rawToChar(api_call$content)
+
+api_JSON<-fromJSON(api_char, flatten=TRUE)
+
+Pollutants<-api_JSON %>% 
+  unnest_longer(values)
+
+Pollutants<-Pollutants %>%
+  mutate(Date=values$fromTime,
+         values=values$value) %>% 
+  pivot_wider(Date, names_from=component, values_from=values)
+
+
+Pollutants$Date<-str_sub(Pollutants$Date,start=1L,end=-7L)#tidying the Date variable
+
+Pollutants$Date<-ymd_hms(Pollutants$Date, truncated = 2)#changing Date format
+```
+
+# Get meteorological data from frost.api
+```{r}
+#weather variables
+frost_client_id='<INSERT CLIENT ID HERE>' #Client ID can be obtained from https://frost.met.no/auth/requestCredentials.html)
+
+elements <- get_elements(client_id = frost_client_id)
+
+endpoint <- paste0("https://", frost_client_id, "@frost.met.no/observations/v0.jsonld")
+sources <- c('SN50540') #Florida
+elements <- 'sum(precipitation_amount PT1H),max(wind_speed_of_gust PT1H),min(air_temperature PT1H),max(air_temperature PT1H),over_time(tendency_of_surface_air_pressure PT3H)'
+fields<- c("referenceTime, elementId, value, unit")
+reference_time <- "R4/2017-03-01/2017-05-31/P1Y"
+
+# Build the URL to Frost
+ url <- paste0(
+endpoint, "?",
+"sources=", sources,
+"&referencetime=", reference_time,
+"&fields=", fields,
+"&elements=", elements)
+ 
+#Issue an HTTP GET request and extract JSON data
+nested <- try(fromJSON(URLencode(url),flatten=T))
+Florida<-unnest(nested$data)
+
+Florida_full<-Florida %>% 
+  pivot_wider(id_cols=referenceTime, names_from=elementId, values_from=value)
+
+names(Florida_full)[1]<-"Date"
+Florida_full$Date<-ymd_hms(Florida_full$Date, truncated = 2)#changing Date format
+
+Florida_full<-Florida_full %>% 
+  rename(MaxTemp=`max(air_temperature PT1H)`,
+         Precipitation=`sum(precipitation_amount PT1H)`,
+         MinTemp=`min(air_temperature PT1H)`,
+         MaxWindGust=`max(wind_speed_of_gust PT1H)`,
+         AirPressure=`over_time(tendency_of_surface_air_pressure PT3H)`)
+```
+
+# Combine the datasets and clean the environment
+```{r}
+Combined<-Trafficdata %>% 
+  right_join(Florida_full, Trafficdata, by="Date")
+
+Combined<-Combined %>% 
+  left_join(Pollutants, Combined, by="Date") %>% 
+  select(-Coverage)
+
+rm(list=setdiff(ls(), "Combined"))
+```
+
+# Add seasonal variables
+```{r}
+CombinedNew<-Combined
+
+Sys.setlocale("LC_TIME", "C")
+CombinedNew$day<- weekdays(as.Date(CombinedNew$Date))
+CombinedNew$day<-as.factor(CombinedNew$day)
+CombinedNew <- cbind(CombinedNew,createDummyFeatures(CombinedNew[,17], cols = c("day"), method="reference"))
+
+
+CombinedNew$hour<- lubridate::hour(CombinedNew$Date)
+CombinedNew$hour<-as.factor(CombinedNew$hour)
+CombinedNew <- cbind(CombinedNew,createDummyFeatures(CombinedNew[,24], cols = c("hour"), method="reference"))
+
+
+CombinedNew<-CombinedNew %>% #Red days in Norway from 2017 to 2020
+  mutate(Holiday=if_else(Date>="2016-12-24"& Date<="2016-12-26", 1,
+                          if_else(Date>="2017-12-24"& Date<="2017-12-26", 1,
+                          if_else(Date>="2018-12-24"& Date<="2018-12-26", 1,
+                          if_else(Date>="2019-12-24"& Date<="2019-12-26", 1,
+                          if_else(Date>="2020-12-24"& Date<="2020-12-26", 1,
+                          if_else(Date>="2017-01-01"& Date<="2017-01-01", 1,
+                          if_else(Date>="2018-01-01"& Date<="2018-01-01", 1,
+                          if_else(Date>="2019-01-01"& Date<="2019-01-01", 1,
+                          if_else(Date>="2020-01-01"& Date<="2020-01-01", 1,
+                          if_else(Date>="2021-01-01"& Date<="2021-01-01", 1,
+                          if_else(Date>="2017-04-13"& Date<="2017-04-17", 1,
+                          if_else(Date>="2018-03-29"& Date<="2018-04-02", 1,
+                          if_else(Date>="2019-04-18"& Date<="2019-04-22", 1,
+                          if_else(Date>="2020-04-09"& Date<="2020-04-13", 1,
+                          if_else(Date>="2017-05-01"& Date<="2017-05-01", 1,
+                          if_else(Date>="2018-05-01"& Date<="2018-05-01", 1,
+                          if_else(Date>="2019-05-01"& Date<="2019-05-01", 1,
+                          if_else(Date>="2020-05-01"& Date<="2020-05-01", 1,
+                          if_else(Date>="2017-05-17"& Date<="2017-05-17", 1,
+                          if_else(Date>="2018-05-17"& Date<="2018-05-17", 1,
+                          if_else(Date>="2019-05-17"& Date<="2019-05-17", 1,
+                          if_else(Date>="2020-05-17"& Date<="2020-05-17", 1,
+                          if_else(Date>="2017-05-25"& Date<="2017-05-25", 1,
+                          if_else(Date>="2018-05-10"& Date<="2018-05-10", 1,
+                          if_else(Date>="2019-05-30"& Date<="2019-05-30", 1,
+                          if_else(Date>="2020-05-21"& Date<="2020-05-21", 1,
+                          if_else(Date>="2017-06-04"& Date<="2017-06-05", 1,
+                          if_else(Date>="2018-05-20"& Date<="2018-05-21", 1,
+                          if_else(Date>="2019-06-09"& Date<="2019-06-10", 1,
+                          if_else(Date>="2020-05-31"& Date<="2020-06-01", 1, 0)))))))))))))))))))))))))))))))
+
+CombinedNew<-CombinedNew %>%
+  mutate(RushHour=if_else(day!="Saturday"&day!="Sunday"&as.integer(hour)<=10&as.integer(hour)>=7,1,
+                          if_else(day!="Saturday"&day!="Sunday"&as.integer(hour)>=15&as.integer(hour)<=18,1,0)))
+```
+
+# Creating comparable periods from 2017-2020
+```{r}
+#filter out weekend and start the count from the same week and same day of the week
+CombinedNew<-CombinedNew %>% 
+  mutate(weekend=if_else(day=="Saturday"|day=="Sunday",1,0))
+
+#Match days from the same week and weekdays, omit holidays and rainy days
+CombinedNew<-CombinedNew %>% 
+  mutate(Lockdown=if_else(Date>="2020-03-09" & Date<="2020-05-19" & weekend==0 & Holiday==0 & Precipitation==0, 1, 0), #lockdown 12th of March?
+         Previous2017=if_else(Date>="2017-03-13" & Date<="2017-05-23" & weekend==0 & Holiday==0 & Precipitation==0, 1,0),
+         Previous2018=if_else(Date>="2018-03-12" & Date<="2018-05-22" & weekend==0 & Holiday==0 & Precipitation==0, 1,0),
+         Previous2019=if_else(Date>="2019-03-11" & Date<="2019-05-21" & weekend==0 & Holiday==0 & Precipitation==0, 1,0),
+         PreviousYears=Previous2017+Previous2018+Previous2019)
+
+AnalysisData<-CombinedNew %>% 
+  select(Date, NO2,PM10,PM2.5, u5.6m, o5.6m, Previous2017,Previous2018, Previous2019, PreviousYears, Lockdown, weekend, hour, MaxTemp, AirPressure, MinTemp, Precipitation, MaxWindGust, RushHour, b5676m, b76125m, b12516m, b1624m, o24m) %>% 
+  filter(Lockdown==1 | PreviousYears==1) %>% 
+  mutate(Period=if_else(Lockdown==1, "2020 Lockdown",
+                          if_else(Previous2017==1, "2017",
+                                    if_else(Previous2018==1, "2018",
+                                              if_else(Previous2019==1, "2019", "Other")))))
+
+#Negative values of pollutant concentrations (under detection limit, usually at nighttime) to be transformed to abs/2
+AnalysisData<-AnalysisData %>% 
+  mutate(NO2=if_else(NO2<0, abs(NO2)/2, NO2),
+         PM10=if_else(PM10<0, abs(PM10)/2, PM10),
+         PM2.5=if_else(PM2.5<0, abs(PM2.5)/2, PM2.5))
+
+```
+
+# Inspect NAs
+```{r, fig.width=10,fig.height=5}
+#2017 has the most NAs, NO2 has considerably more NAs than other pollutants
+AnalysisData %>% 
+  select(Period, NO2, PM10, PM2.5) %>% 
+  pivot_longer(cols=NO2:PM2.5, names_to="Pollutant", values_to="value") %>% 
+  filter(is.na(value)) %>% 
+  ggplot(mapping=aes(x=Period))+
+  geom_bar()+
+  labs(title="NAs per pollutant category", y="Number of missing values")+
+  facet_wrap(Pollutant~.)+
+  theme_bw()
+
+#Most frequent NO2 NA values come from business hours
+AnalysisData %>% 
+  mutate(NAvalue=if_else(is.na(NO2), 1, 0)) %>% 
+  group_by(hour) %>% 
+  ggplot(mapping=aes(x=hour, y=NAvalue, fill=Period))+
+  geom_col()+
+  labs(title="Hourly count of missing NO2 values", y="Number of missing values")+
+  scale_y_continuous(breaks=c(2,4,6,8,10))+
+  scale_fill_npg(palette=c("nrc"),alpha=.8)+
+  theme_bw()
+
+#hours 8, 22 and 23 are least represented, but overall the distribution of NAs is more or less stable
+AnalysisData %>% 
+  na.omit() %>% 
+  group_by(hour) %>%
+  summarise(count=length(hour)) %>% 
+  ggplot(aes(x=hour, y=count))+
+  geom_col()+
+  labs(title="Distribution of hours left in dataframe", y="Number of hours")+
+  theme_bw()
+
+  
+```
+
+# Summary statistics of hourly data
+
+### Lockdown period statistics for NO2 show the biggest difference in median, standard deviation and IQR compared to the other pollutants. Coefficient of variation varied less for NO2 than for other pollutants as well, which means that during the lockdown period the standard deviation and the mean decreased proportionally. 
+```{r}
+st(AnalysisData, group="Period", group.long = T, vars=c('NO2', 'PM10', 'PM2.5'),
+   summ=list(c('notNA(x)','median(x)','sd(x)','IQR(x)','min(x)', 'max(x)','cv(x)')),
+   summ.names=list(c('Number of observations','Median','Standard deviation','Interquartile range','Min','Max','Coefficient of variation')))
+
+
+```
+
+### Vehicle volume drop is more obvious in the light vehicle category. That could be attributed to lockdowns curbing unnecessary travel with personal cars, while heavy vehicles operating for commercial reasons still were doing routine commuting. 
+```{r}
+var.labs<-data.frame(var=c('u5.6m', 'o5.6m'),
+                     labels=c('Light vehicles', 'Heavy vehicles'))
+
+st(AnalysisData, group="Period", group.long = T, labels=var.labs, vars=c('u5.6m', 'o5.6m'),
+   summ=list(c('notNA(x)','median(x)','sd(x)','IQR(x)','min(x)', 'max(x)','cv(x)')),
+   summ.names=list(c('Number of observations','Median','Standard deviation','Interquartile range','Min','Max','Coefficient of variation')))
+```
+
+
+# Visualization of hourly data
+
+### Pollutants plotted on a graph visually confirm the previous suspections that lockdowns effected mostly NO2 levels relative to previous periods. The shape of nitrogen dioxide's 2020 Lockdown line stays the same with the previous years, but is a constant lower. PM10 lines are all clustered in the early hours and rise as the business day progresses with peaks around noon followed by a rather continuous downturn into the evening. PM2.5 seems to have the most inconsistent pattern over the years. While NO2 levels are largely caused by local traffic, PM2.5 levels are in addition to that affected by burning of firewood and docking ships which in relation to daily commuting are less deterministic occurrences.
+```{r, fig.width=10,fig.height=5}
+AnalysisData %>%
+  na.omit() %>% 
+  mutate(Period=factor(Period)) %>% 
+  select(hour, Period, NO2, PM10, PM2.5) %>%
+  group_by(hour, Period) %>% 
+  summarise(NO2=mean(NO2),
+            PM10=mean(PM10),
+            PM2.5=mean(PM2.5)) %>% 
+  pivot_longer(cols=NO2:PM2.5, names_to="variable", values_to="value") %>% 
+  ggplot(aes(x=hour, y=value))+
+  geom_point(aes(color=Period))+
+  geom_line(aes(group=Period,color=Period, linetype = Period %in% c("2020 Lockdown")))+
+  facet_wrap(variable~., scales="free_y")+
+  scale_x_discrete(breaks=c(4,8,12,16,20))+
+  scale_linetype_manual(values = c("TRUE" = "solid", "FALSE" = "dotted"))+
+  guides(linetype = "none")+
+  labs(title="Average hourly pollutant concentration comparison between periods", y="µg/m³")+
+  theme_bw()
+```
+
+### Light vehicles (u5.6m) have the highest volume of cars compared to other vehicle lengths, but per one unit pollute the least since they have smaller motors and a good share of them are electric or hybrid vehicles. However, on scale the effect of having a thousand light vehicles off the streets might be more significant for reducing pollution than being without dozens of trucks and buses. Light vehicles lost volume nearly every hour of the day during 2020 Lockdown compared to previous 3 year's average. The change in the longer vehicle classes is less obvious with vehicles between 5.6 and 7.6 meters barely changing and 7.6m to 12.5m vehicles surprisingly gaining volume during lockdown year. The longer vehicles that are over 12.5 meters show reduced quantities in 2020, but they also have the lowest hourly mean values. The main change here seems to be reduction in light vehicle movements. 
+```{r}
+Lengths<-c("u5.6m","b5676m","b76125m","b12516m","b1624m","o24m")
+
+f21<-AnalysisData%>%
+  na.omit() %>% 
+  dplyr::select(hour, Period, Lengths,PM2.5,PM10, NO2, RushHour) %>%
+  mutate(hour=as.factor(hour),
+         Period=if_else(Period=='2020 Lockdown', '2020 Lockdown', '2017-2019')) %>%
+  group_by(hour, Period) %>% 
+  summarize(u5.6m=mean(u5.6m),
+            b5676m=mean(b5676m),
+            b76125m=mean(b76125m),
+            b12516m=mean(b12516m),
+            b1624m=mean(b1624m),
+            o24m=mean(o24m),
+            PM2.5=mean(PM2.5),
+            PM10=mean(PM10),
+            NO2=mean(NO2),
+            RushHour=median(RushHour)) %>% 
+  pivot_longer(cols=u5.6m:NO2, names_to="Series", values_to="Value") %>%
+  mutate(Series = factor(Series, levels=c("NO2","PM2.5","PM10","u5.6m","b5676m","b76125m","b12516m","b1624m","o24m"))) %>%
+  ggplot(mapping=aes(x=hour, y=Value, fill=factor(RushHour)))+
+  geom_col(aes(color=Period), alpha=.4, position="identity")+
+  facet_wrap(~Series, scales="free_y")+
+  theme_bw()+
+  labs(title="Mean hourly distribution of vehicle length volumes and pollutant concentration levels")
+
+f21+theme_classic()+scale_fill_discrete(name = "Rush Hour", labels = c("No", "Yes"))+guides(fill = guide_legend(reverse = TRUE))+scale_x_discrete(breaks=seq(0,24, by=4))+scale_color_manual(values = c("white", "black"))
+```
+
+
+# Visualization of daily averages
+### When plotting average daily pollutant levels in the span of two months compared to comparable periods in previous years it is apparent that NO2 levels were lower already before the first lockdown was enforced.  The smoothed line of NO2 captures similar patterns as the ones for light and heavy vehicles, however there is a spike in concentration levels in the second half of April which could be explained by low winds that foster local pollutant accumulation.
+```{r, fig.width=10,fig.height=5}
+DailyAggregate<-AnalysisData %>%
+  na.omit() %>% 
+  select(-Period) %>% 
+  mutate(Date=as.POSIXct(as.Date(Date, "%Y-%m-%d")),
+         o16m=b1624m+o24m) %>% 
+  group_by(Date) %>% 
+  summarise(NO2=mean(NO2),
+            PM10=mean(PM10),
+            PM2.5=mean(PM2.5),
+            u5.6m=mean(u5.6m),
+            o5.6m=mean(o5.6m),
+            o16m=mean(o16m),
+            Previous2017=median(Previous2017),
+            Previous2018=median(Previous2018),
+            Previous2019=median(Previous2019),
+            PreviousYears=median(PreviousYears),
+            Lockdown=median(Lockdown),
+            MinTemp=mean(MinTemp),
+            MaxTemp=mean(MaxTemp),
+            Precipitation=mean(Precipitation),
+            AirPressure=mean(AirPressure),
+            MaxWindGust=mean(MaxWindGust),
+  )
+
+
+PreviousYears<-function(data, y){
+  First<-data %>% 
+    filter(Previous2017==1) %>% 
+    dplyr::select(y)
+  Second<-data %>%
+    filter(Previous2018==1) %>% 
+    dplyr::select(y)
+  Third<-data %>%
+    filter(Previous2019==1) %>% 
+    dplyr::select(y)
+
+  return(MeanYears<-rowMeans(cbind(First[,1],Second[,1],Third[,1])))
+}
+                          
+PreviousNO2<-PreviousYears(DailyAggregate, "NO2")
+PreviousPM10<-PreviousYears(DailyAggregate, "PM10")
+PreviousPM2.5<-PreviousYears(DailyAggregate, "PM2.5")
+Previousu5.6m<-PreviousYears(DailyAggregate, "u5.6m")
+Previouso5.6m<-PreviousYears(DailyAggregate, "o5.6m")
+PreviousMaxWindGust<-PreviousYears(DailyAggregate, "MaxWindGust")
+
+DailyAggregate<-DailyAggregate %>% 
+  filter(Lockdown==1) %>% 
+  mutate(PreLockdownNO2=PreviousNO2,
+         PreLockdownPM10=PreviousPM10,
+         PreLockdownPM2.5=PreviousPM2.5,
+         PreLockdownu5.6m=Previousu5.6m,
+         PreLockdowno5.6m=Previouso5.6m,
+         PreLockdownMaxWindGust=PreviousMaxWindGust)
+
+DailyAggregate %>% 
+  pivot_longer(cols=c('PreLockdownNO2', 'PreLockdownPM10', 'PreLockdownPM2.5','NO2', 'PM10', 'PM2.5'), names_to="Pollutants", values_to="Value") %>% 
+  mutate(Period=if_else(Pollutants==c('PreLockdownNO2', 'PreLockdownPM10', 'PreLockdownPM2.5'), "2017-2019 Average","2020 Lockdown"),
+         Pollutant=if_else(Pollutants=='NO2'|Pollutants=='PreLockdownNO2','NO2',
+                           if_else(Pollutants=='PM10'|Pollutants=='PreLockdownPM10','PM10',
+                           if_else(Pollutants=='PM2.5'|Pollutants=='PreLockdownPM2.5','PM2.5', "")))) %>% 
+  ggplot(aes(x=Date, y=Value))+
+  geom_point(aes(color=Period), alpha=.9)+
+  geom_smooth(aes(color=Period), alpha=.15)+
+  geom_vline(aes(xintercept=as.POSIXct(as.Date("2020-03-12")), linetype="First Covid-19 Lockdown"), colour="blue", size=.5)+
+  facet_wrap(Pollutant~.,scales = "free_y")+
+  labs(title="Average daily pollutant concentration comparison between lockdown and pre-lockdown periods", y="µg/m³")+
+  scale_linetype_manual(name = "", values = c(2))+
+  theme_bw()
+
+
+DailyAggregate %>% 
+  pivot_longer(cols=c('PreLockdownu5.6m', 'PreLockdowno5.6m', 'PreLockdownMaxWindGust','u5.6m', 'o5.6m', 'MaxWindGust'), names_to="Vehicles", values_to="Value") %>% 
+  mutate(Period=if_else(Vehicles==c('PreLockdownu5.6m', 'PreLockdowno5.6m', 'PreLockdownMaxWindGust'), "2017-2019 Average","2020 Lockdown"),
+         Volume=if_else(Vehicles=='u5.6m'|Vehicles=='PreLockdownu5.6m','Light vehicles',
+                           if_else(Vehicles=='o5.6m'|Vehicles=='PreLockdowno5.6m','Heavy vehicles',
+                           if_else(Vehicles=='MaxWindGust'|Vehicles=='PreLockdownMaxWindGust','Maximum wind gust', "")))) %>% 
+  ggplot(aes(x=Date, y=Value))+
+  geom_point(aes(color=Period), alpha=.9)+
+  geom_smooth(aes(color=Period), alpha=.15)+
+  geom_vline(aes(xintercept=as.POSIXct(as.Date("2020-03-12")), linetype="First Covid-19 Lockdown"), colour="blue", size=.5)+
+  facet_wrap(Volume~.,scales = "free_y")+
+  labs(title="Average daily vehicle volume comparison between lockdown and pre-lockdown periods", y="Number of vehicles and wind gust speed m/s")+
+  scale_linetype_manual(name = "", values = c(2))+
+  theme_bw()
+```
+
+# Statistical tests
+### Strong multicollinearity between the vehicle length variables is obvious from VIF scores. Around 50% of the variation is explained by the first three linear models. However, when adding the previous value of NO2 to the model then 72% of variation is explained which implies strong autocorrelation. Wind gust speed and lockdown period are very significant with large negative coefficients implying that an unit increase in both lead to a decrease in NO2 levels. However, 2020 Lockdown variable indicates the aggregation of the whole period while wind gust speed at 1 m/s intervals. A 10 unit decrease in NO2 concentration was approximately the difference between the year 2017 and the 2020 Lockdown levels visible from earlier graphs and summary statistics. 
+```{r}
+AnalysisData<-AnalysisData %>% 
+  mutate(TrafficVolume=u5.6m+o5.6m) #aggregate to a total
+
+fit<-lm(NO2~TrafficVolume+MinTemp+MaxWindGust+AirPressure+Period, data=AnalysisData)
+summ(fit, vifs=TRUE, digits = 3)
+
+fit2<-lm(NO2~u5.6m+o5.6m+MinTemp+MaxWindGust+AirPressure+Period, data=AnalysisData)
+summ(fit2, vifs=TRUE, digits = 3)
+
+fit3<-lm(NO2~u5.6m+b5676m+b76125m+b12516m+b1624m+o24m+MinTemp+MaxWindGust+AirPressure+Period, data=AnalysisData)
+summ(fit3, vifs=TRUE, digits = 3)
+
+fit4<-lm(NO2~dplyr::lag(NO2,1)+TrafficVolume+MinTemp+MaxWindGust+AirPressure+Period, data=AnalysisData)
+summ(fit4, vifs=TRUE, digits = 3)
+
+export_summs(fit, fit2,fit3,fit4, scale = TRUE, error_format = "[{conf.low}, {conf.high}]") #95% conf intervals
+```
+
+
