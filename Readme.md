@@ -11,18 +11,18 @@
 
 ## Creating comparable periods between Lockdown months in 2020 and same weeks/days from previous years of 2017, 2018 and 2019.
 #### Omitting holidays as they would have unusually low traffic flow. Omitting weekends due to change in commuting patterns. 
-#### Transforming negative values of pollutant concentrations to absolute value over 2
-#### Inspecting the distribution of NAs in pollutant concentrations
+#### Transforming negative values of pollutant concentrations to absolute value over 2.
+#### Inspecting the distribution of NAs in pollutant concentrations.
 
 ## Summary statistics of hourly data on selected time periods
 #### Comparison of Median, SD, IQR, Min, Max, and Coefficient of Variation on pollutant concentration levels and vehicle volume numbers. 
 
 ## Visualizations of the data
-#### Average hourly pollutant concentration between periods
-#### Mean hourly distribution of vehicle length volumes and pollutant concentration levels
-#### Average daily pollutant concentration comparison between lockdown and pre-lockdown periods
-#### Average daily vehicle volume comparison between lockdown and pre-lockdown periods
+#### Average hourly pollutant concentration between periods.
+#### Mean hourly distribution of vehicle length volumes and pollutant concentration levels.
+#### Average daily pollutant concentration comparison between lockdown and pre-lockdown periods.
+#### Average daily vehicle volume comparison between lockdown and pre-lockdown periods.
 
 ## Statistical tests
-#### Linear models of the data with different variables as input
-#### Multicollinearity and autocorrelation present
+#### Linear models of the data with different variables as input.
+#### Multicollinearity and autocorrelation present.
