@@ -262,10 +262,10 @@ CombinedNew<-CombinedNew %>%
 
 #Match days from the same week and weekdays, omit holidays and rainy days
 CombinedNew<-CombinedNew %>% 
-  mutate(Lockdown=if_else(Date>="2020-03-09" & Date<="2020-05-19" & weekend==0 & Holiday==0 & Precipitation==0, 1, 0), #lockdown 12th of March?
-         Previous2017=if_else(Date>="2017-03-13" & Date<="2017-05-23" & weekend==0 & Holiday==0 & Precipitation==0, 1,0),
-         Previous2018=if_else(Date>="2018-03-12" & Date<="2018-05-22" & weekend==0 & Holiday==0 & Precipitation==0, 1,0),
-         Previous2019=if_else(Date>="2019-03-11" & Date<="2019-05-21" & weekend==0 & Holiday==0 & Precipitation==0, 1,0),
+  mutate(Lockdown=if_else(Date>="2020-03-09" & Date<="2020-05-19" & weekend==0 & Holiday==0, 1, 0), #lockdown 12th of March?
+         Previous2017=if_else(Date>="2017-03-13" & Date<="2017-05-23" & weekend==0 & Holiday==0, 1,0),
+         Previous2018=if_else(Date>="2018-03-12" & Date<="2018-05-22" & weekend==0 & Holiday==0, 1,0),
+         Previous2019=if_else(Date>="2019-03-11" & Date<="2019-05-21" & weekend==0 & Holiday==0, 1,0),
          PreviousYears=Previous2017+Previous2018+Previous2019)
 
 AnalysisData<-CombinedNew %>% 
@@ -323,7 +323,7 @@ AnalysisData %>%
 
 # Summary statistics of hourly data
 
-### Lockdown period statistics for NO2 show the biggest difference in median, standard deviation and IQR compared to the other pollutants. Coefficient of variation varied less for NO2 than for other pollutants as well, which means that during the lockdown period the standard deviation and the mean decreased proportionally. 
+### Lockdown period statistics for NO2 show the biggest difference in median, standard deviation and IQR compared to the other pollutants. Coefficient of variation varied less for NO2 than for other pollutants, which means that during the lockdown period the standard deviation and the mean decreased proportionally. 
 ```{r}
 st(AnalysisData, group="Period", group.long = T, vars=c('NO2', 'PM10', 'PM2.5'),
    summ=list(c('notNA(x)','median(x)','sd(x)','IQR(x)','min(x)', 'max(x)','cv(x)')),
